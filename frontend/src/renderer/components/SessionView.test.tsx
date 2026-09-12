@@ -32,6 +32,7 @@ const interfaceTransitionState = vi.hoisted(() => ({
 }));
 const reviewGetMock = vi.hoisted(() => vi.fn());
 const inspectorVisibilityRenders = vi.hoisted(() => [] as boolean[]);
+const chatSurfaceRenders = vi.hoisted(() => [] as string[]);
 const chatSurfaceWorkState = vi.hoisted(() => ({
 	controllerBusy: false,
 	hasRunningTurn: false,
@@ -224,8 +225,9 @@ vi.mock("./TerminalSwitchAgentButton", () => ({
 	TerminalSwitchAgentButton: ({ variant }: { variant?: "icon" | "menu-item" }) =>
 		variant === "menu-item" ? null : <button aria-label="Switch agent" type="button" />,
 }));
-vi.mock("./chat/SessionChatSurface", () => ({
-	SessionChatSurface: ({
+vi.mock("./chat/SessionChatSurface", async () => {
+	const { memo } = await vi.importActual<typeof import("react")>("react");
+	return { SessionChatSurface: memo(({
 		session,
 		onOpenShell,
 		onOpenFile,
@@ -269,7 +271,9 @@ vi.mock("./chat/SessionChatSurface", () => ({
 		onConversationWorkChange?: (state: typeof chatSurfaceWorkState) => void;
 		auxiliaryTabOrder?: string[];
 		onAuxiliaryTabOrderChange?: (keys: string[]) => void;
-	}) => (
+	}) => {
+		chatSurfaceRenders.push(session.id);
+		return (
 		<div
 			data-testid="chat-surface"
 			data-transitioning={controllerTransitioning ? "true" : "false"}
@@ -349,8 +353,10 @@ vi.mock("./chat/SessionChatSurface", () => ({
 				report chat work
 			</button>
 		</div>
-	),
-}));
+		);
+	}),
+	};
+});
 vi.mock("./CenterPane", () => ({
 	CenterPane: ({
 		session,
@@ -672,6 +678,17 @@ function render(ui: ReactNode) {
 }
 
 describe("SessionView", () => {
+	function inspectorWidthVariable() {
+		return screen
+			.getByTestId("panel-group")
+			.querySelector<HTMLElement>('[data-slot="inspector-gap"]')
+			?.style.getPropertyValue("--ao-inspector-w");
+	}
+
+	function inspectorPanelWidthVariable() {
+		return screen.getByTestId("panel-inspector").style.getPropertyValue("--ao-inspector-w");
+	}
+
 	beforeEach(() => {
 		for (const sessionId of ["sess-1", "sess-2", "sess-orch", "sess-cross-project"]) {
 			setChatDraftBoundary(sessionId, "composer", undefined);
@@ -679,6 +696,7 @@ describe("SessionView", () => {
 		}
 		routeBlockerState.options = undefined;
 		inspectorVisibilityRenders.length = 0;
+		chatSurfaceRenders.length = 0;
 		nativeFullScreenMock.mockReturnValue(false);
 		window.localStorage.clear();
 		for (const session of workspaces.flatMap((workspace) => workspace.sessions)) {
@@ -2428,6 +2446,15 @@ describe("SessionView", () => {
 		expect(openingRenders).not.toContain(false);
 	});
 
+	it("does not rerender the memoized chat surface when the inspector toggles", () => {
+		render(<SessionView sessionId="sess-1" />);
+		const rendersBeforeToggle = chatSurfaceRenders.length;
+
+		act(() => useUiStore.getState().setInspectorOpen("sess-1", false));
+
+		expect(chatSurfaceRenders).toHaveLength(rendersBeforeToggle);
+	});
+
 	it("starts collapsing the resize handle with the inspector panel", () => {
 		render(<SessionView sessionId="sess-1" />);
 
@@ -2594,11 +2621,11 @@ describe("SessionView", () => {
 		window.localStorage.setItem("ao.inspector.widthPx", "720");
 		window.localStorage.setItem("ao.workspace.browser.canvasWidthPx", "460");
 		render(<SessionView sessionId="sess-1" />);
-		expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("720px");
+		expect(inspectorWidthVariable()).toBe("720px");
 
 		fireEvent.click(screen.getByRole("tab", { name: "Browser" }));
 		await waitFor(() => {
-			expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("720px");
+			expect(inspectorWidthVariable()).toBe("720px");
 		});
 	});
 
@@ -2606,18 +2633,47 @@ describe("SessionView", () => {
 		window.localStorage.setItem("ao.inspector.widthPx", "240");
 		act(() => useUiStore.getState().setInspectorOpen("sess-1", true));
 		render(<SessionView sessionId="sess-1" />);
-		expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("340px");
+		expect(inspectorWidthVariable()).toBe("340px");
+	});
+
+	it("resizes the inspector panel and terminal gap together on each animation frame", () => {
+		const frames: FrameRequestCallback[] = [];
+		const requestAnimationFrameSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+			frames.push(callback);
+			return frames.length;
+		});
+		try {
+			render(<SessionView sessionId="sess-1" />);
+			frames.length = 0;
+			const handle = screen.getByTestId("inspector-resize-handle");
+			expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("");
+
+			fireEvent.pointerDown(handle, { clientX: 100 });
+			fireEvent.pointerMove(window, { clientX: 200 });
+			expect(inspectorWidthVariable()).toBe("500px");
+			expect(frames).toHaveLength(1);
+
+			act(() => frames.shift()?.(performance.now()));
+			expect(inspectorWidthVariable()).toBe("400px");
+			expect(inspectorPanelWidthVariable()).toBe("400px");
+
+			fireEvent.pointerUp(window);
+			expect(inspectorWidthVariable()).toBe("400px");
+			expect(inspectorPanelWidthVariable()).toBe("400px");
+		} finally {
+			requestAnimationFrameSpy.mockRestore();
+		}
 	});
 
 	it("grows Browser into a co-work canvas while utility surfaces stay consistent", async () => {
 		render(<SessionView sessionId="sess-1" />);
 		expect(screen.getByTestId("panel-group")).toHaveAttribute("data-workspace-mode", "utility");
-		expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("500px");
+		expect(inspectorWidthVariable()).toBe("500px");
 
 		act(() => useUiStore.getState().setInspectorView("sess-1", "browser"));
 		await waitFor(() => {
 			expect(screen.getByTestId("panel-group")).toHaveAttribute("data-workspace-mode", "browser");
-			expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("900px");
+			expect(inspectorWidthVariable()).toBe("900px");
 			expect(
 				screen.getByTestId("panel-group").style.getPropertyValue("--session-inspector-max-width"),
 			).toBe("min(68%, max(300px, calc(100% - 440px)))");
@@ -2626,7 +2682,7 @@ describe("SessionView", () => {
 		act(() => useUiStore.getState().setInspectorView("sess-1", "files"));
 		await waitFor(() => {
 			expect(screen.getByTestId("panel-group")).toHaveAttribute("data-workspace-mode", "files");
-			expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("500px");
+			expect(inspectorWidthVariable()).toBe("500px");
 			expect(
 				screen.getByTestId("panel-group").style.getPropertyValue("--session-inspector-max-width"),
 			).toBe("min(55%, max(300px, calc(100% - 560px)))");
@@ -2641,13 +2697,13 @@ describe("SessionView", () => {
 
 			const split = screen.getByTestId("panel-group");
 			expect(split).toHaveAttribute("data-workspace-resizing", "true");
-			expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("900px");
+			expect(inspectorWidthVariable()).toBe("900px");
 			act(() => vi.advanceTimersByTime(300));
 			expect(split).not.toHaveAttribute("data-workspace-resizing");
 
 			fireEvent.click(screen.getByRole("tab", { name: "Summary" }));
 			expect(split).toHaveAttribute("data-workspace-resizing", "true");
-			expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("500px");
+			expect(inspectorWidthVariable()).toBe("500px");
 			act(() => vi.advanceTimersByTime(300));
 			expect(split).not.toHaveAttribute("data-workspace-resizing");
 		} finally {
@@ -2660,11 +2716,11 @@ describe("SessionView", () => {
 		render(<SessionView sessionId="sess-1" />);
 
 		fireEvent.click(screen.getByRole("tab", { name: "Browser" }));
-		expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("820px");
+		expect(inspectorWidthVariable()).toBe("820px");
 		expect(useUiStore.getState().isSidebarOpen).toBe(true);
 
 		fireEvent.click(screen.getByRole("tab", { name: "Summary" }));
-		expect(document.documentElement.style.getPropertyValue("--ao-inspector-w")).toBe("500px");
+		expect(inspectorWidthVariable()).toBe("500px");
 	});
 
 	it("never changes the sidebar preference while browser surfaces open and close", async () => {
