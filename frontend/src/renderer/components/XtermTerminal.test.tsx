@@ -19,6 +19,7 @@ const state = vi.hoisted(() => ({
 		findPrevious: ReturnType<typeof vi.fn>;
 		resultListeners: Set<(results: { resultCount: number; resultIndex: number }) => void>;
 	},
+	mouseMoveListener: vi.fn(),
 	lastTerminal: null as null | {
 		write(data: Uint8Array, done?: () => void): void;
 		keyHandler?: (event: KeyboardEvent) => boolean;
@@ -44,11 +45,16 @@ const state = vi.hoisted(() => ({
 		selectionListeners: Set<() => void>;
 		scrollListeners: Set<() => void>;
 		_core: {
-			element: { classList: { add: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> } };
+			element: {
+				classList: { add: ReturnType<typeof vi.fn>; remove: ReturnType<typeof vi.fn> };
+				getBoundingClientRect: () => DOMRect;
+			};
 			viewport: { scrollBarWidth: number };
 			_selectionService: {
 				enable: ReturnType<typeof vi.fn>;
 				shouldForceSelection: (event: MouseEvent) => boolean;
+				_mouseMoveListener?: EventListener;
+				_dragScrollAmount?: number;
 			};
 		};
 	},
@@ -95,11 +101,16 @@ vi.mock("@xterm/xterm", () => ({
 		scrollListeners = new Set<() => void>();
 		writeBuffer = "";
 		_core = {
-			element: { classList: { add: vi.fn(), remove: vi.fn() } },
+			element: {
+				classList: { add: vi.fn(), remove: vi.fn() },
+				getBoundingClientRect: () => ({ left: 0, right: 800 }) as DOMRect,
+			},
 			viewport: { scrollBarWidth: 15 },
 			_selectionService: {
 				enable: vi.fn(),
 				shouldForceSelection: () => false,
+				_mouseMoveListener: state.mouseMoveListener,
+				_dragScrollAmount: 0,
 			},
 		};
 
@@ -233,6 +244,7 @@ describe("XtermTerminal", () => {
 		state.linkHandler = null;
 		state.queueViewportSyncOnOpen = false;
 		state.searchAddon = null;
+		state.mouseMoveListener.mockClear();
 		setNavigatorPlatform("Linux x86_64");
 		window.ao!.clipboard.writeText = vi.fn().mockResolvedValue(undefined);
 		window.ao!.clipboard.readText = vi.fn().mockResolvedValue("");
@@ -2141,5 +2153,21 @@ describe("XtermTerminal", () => {
 		window.removeEventListener("drop", bubbled);
 		expect(bubbled).toHaveBeenCalledTimes(1);
 		expect(saveDroppedFile).not.toHaveBeenCalled();
+	});
+
+	it("does not extend a drag selection into a neighboring pane or keep auto-scrolling", () => {
+		render(<XtermTerminal theme="dark" />);
+		const selectionService = state.lastTerminal!._core._selectionService;
+		const listener = selectionService._mouseMoveListener!;
+
+		// Simulate xterm's timer having been armed by a previous drag below the
+		// terminal before the pointer crosses horizontally into the sidebar.
+		selectionService._dragScrollAmount = 1;
+		listener(new MouseEvent("mousemove", { clientX: 801 }));
+		expect(state.mouseMoveListener).not.toHaveBeenCalled();
+		expect(selectionService._dragScrollAmount).toBe(0);
+
+		listener(new MouseEvent("mousemove", { clientX: 800 }));
+		expect(state.mouseMoveListener).toHaveBeenCalledTimes(1);
 	});
 });
